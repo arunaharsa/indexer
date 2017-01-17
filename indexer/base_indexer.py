@@ -6,6 +6,8 @@ from django.conf import settings
 from django.contrib.auth.models import AnonymousUser
 from django.test.client import RequestFactory
 
+from .utils import underscore_to_camelcase, recursive_key_map
+
 algolia_settings = settings.ALGOLIA
 APP_ID = algolia_settings['APPLICATION_ID']
 API_KEY = algolia_settings['API_KEY']
@@ -41,65 +43,53 @@ class BaseIndexer(object):
     def get_property_for_objectID(self):
         return 'id'
 
-    def index_all_queryset(self):
+    def get_index_setting_dict(self):
+        return {
+            "attributesToIndex": [],
+            "attributesForFaceting": [],
+            "attributesToRetrieve": [],
+            "customRanking": [],
+            "attributesToHighlight": [],
+            "synonyms": []
+        }
+
+    def get_index_all_queryset(self):
         return self.model.objects.all()
 
-    def index_partial_queryset(self, list_of_objectID):
+    def get_index_partial_queryset(self, list_of_objectID):
         kwargs = {'{0}__{1}'.format(self.get_property_for_objectID(), 'in'): list_of_objectID}
         return self.model.objects.filter(**kwargs)
 
     def build_object(self, instance):
         user = AnonymousUser()
 
-        #quick fix
+        # Create fake context
         SERVER_NAME = "localhost:8000"
         context = dict(request=RequestFactory().get('/', SERVER_NAME=SERVER_NAME))
-
         context['request'].user = user
         request = context['request']
-        ser = self.serializer_class(instance,
-            context=context)
+
+        # Build object
+        # - object to dictionary
+        ser = self.serializer_class(instance, context=context)
         obj = ser.data
-
-        # convert to camelcase
+        # - convert to camelcase
         res = recursive_key_map(underscore_to_camelcase, obj)
-
-        # attach objectID
+        # - attach objectID
         res['objectID'] =  self.get_objectID(instance)
         return res
+
+
+    """
+        Reindexing Interfaces
+    """
 
     def reindex_one(self, objectID):
         self.reindex_partial([objectID])
         logger.info('UPDATED %s OBJECT %s', objectID, self.index_name)
 
-    def reindex_delete_one(self, objectID):
-        self.reindex_delete_partial([objectID])
-        logger.info('DELETED %s OBJECT %s', objectID, self.index_name)
-
-    def reindex_delete_partial(self, list_of_objectID, batch_size=150):
-        counts = 0
-        result = None
-        batch = []
-
-        for idx, objectId in enumerate(list_of_objectID):
-            batch.append(objectId)
-            if len(batch) >= batch_size:
-                result = self.__index.delete_objects(batch)
-                logger.info('DELETE %d OBJECTS ON %s', len(batch),
-                            self.index_name)
-                batch = []
-            counts += 1
-        if len(batch) > 0: #handle when batch is not all cleared
-            result = self.__index.delete_objects(batch)
-            logger.info('DELETE %d OBJECTS ON %s', len(batch),
-                            self.index_name)
-            counts += 1
-
-        # Assume all items are deleted
-        return counts
-
     def reindex_partial(self, list_of_objectID, batch_size=150):
-        qs = self.index_partial_queryset(list_of_objectID)
+        qs = self.get_index_partial_queryset(list_of_objectID)
 
         counts = 0
         result = None
@@ -125,7 +115,7 @@ class BaseIndexer(object):
         return counts
 
     def reindex_all(self, batch_size=150, async=False):
-        qs = self.index_all_queryset()
+        qs = self.get_index_all_queryset()
 
         '''Spawn workers '''
         counts = 0
@@ -143,7 +133,7 @@ class BaseIndexer(object):
                 batch_counts += 1
                 objectIDs = []
             counts += 1
-        if len(objectIDs) > 0: #handle when batch is not all cleared
+        if len(objectIDs) > 0: # handle when batch is not all cleared
             if async:
                 django_rq.enqueue(self.reindex_partial, objectIDs)
             else:
@@ -156,13 +146,32 @@ class BaseIndexer(object):
 
         print 'Done'
 
+    def reindex_delete_one(self, objectID):
+        self.reindex_delete_partial([objectID])
+        logger.info('DELETED %s OBJECT %s', objectID, self.index_name)
 
-    def update_settings(self):
-        self.__index.set_settings(self.get_index_setting_dict())
-        print 'Settings updated'
+    def reindex_delete_partial(self, list_of_objectID, batch_size=150):
+        counts = 0
+        result = None
+        batch = []
+
+        for idx, objectId in enumerate(list_of_objectID):
+            batch.append(objectId)
+            if len(batch) >= batch_size:
+                result = self.__index.delete_objects(batch)
+                logger.info('DELETE %d OBJECTS ON %s', len(batch),
+                            self.index_name)
+                batch = []
+            counts += 1
+        if len(batch) > 0: # handle when batch is not all cleared
+            result = self.__index.delete_objects(batch)
+            logger.info('DELETE %d OBJECTS ON %s', len(batch),
+                            self.index_name)
+            counts += 1
+        return counts
 
     def rebuild_all(self, batch_size=150):
-        qs = self.index_all_queryset()
+        qs = self.get_index_all_queryset()
 
         '''Reindex all records.'''
         self.__tmp_index.clear_index()
@@ -174,7 +183,7 @@ class BaseIndexer(object):
 
         for idx, instance in enumerate(qs):
             builded_object = self.build_object(instance)
-            print 'building object (', idx + 1, '/', len(qs), ')', builded_object.get('url')
+            print 'Building object (', idx + 1, '/', len(qs), ')', builded_object.get('url')
             batch.append(builded_object)
             if len(batch) >= batch_size:
                 result = self.__tmp_index.save_objects(batch)
@@ -196,38 +205,6 @@ class BaseIndexer(object):
                         self.index_name)
         return counts
 
-    def get_index_setting_dict(self):
-        return {
-            "attributesToIndex": [],
-            "attributesForFaceting": [],
-            "attributesToRetrieve": [],
-            "customRanking": [],
-            "attributesToHighlight": [],
-            "synonyms": []
-        }
-
-# Helper to convert to camelcase
-def is_camel(s):
-    return (s != s.lower() and s != s.upper())
-
-def underscore_to_camelcase(word, lower_first=True):
-    if not is_camel(word):
-        result = ''.join(char.capitalize() for char in word.split('_'))
-        if lower_first:
-            return result[0].lower() + result[1:]
-        else:
-            return result
-    return word
-
-def recursive_key_map(function, obj):
-    if isinstance(obj, dict):
-        new_dict = {}
-        for key, value in obj.iteritems():
-            if isinstance(key, basestring):
-                key = function(key)
-            new_dict[key] = recursive_key_map(function, value)
-        return new_dict
-    if hasattr(obj, '__iter__'):
-        return [recursive_key_map(function, value) for value in obj]
-    else:
-        return obj
+    def update_settings(self):
+        self.__index.set_settings(self.get_index_setting_dict())
+        print 'Settings updated'
