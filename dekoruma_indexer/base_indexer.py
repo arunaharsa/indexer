@@ -24,7 +24,7 @@ class BaseIndexer(object):
         if not self.model:
             raise NotImplementedError
 
-        '''Initializes the index.'''
+        '''Initializes the index'''
         client = algoliasearch.Client(APP_ID, API_KEY)
         self.__client = client
         self.__set_index(client)
@@ -206,10 +206,10 @@ class BaseIndexer(object):
             "synonyms": []
         }
 
+# Helper to convert to camelcase
 def is_camel(s):
     return (s != s.lower() and s != s.upper())
 
-# Helper to convert to camelcase
 def underscore_to_camelcase(word, lower_first=True):
     if not is_camel(word):
         result = ''.join(char.capitalize() for char in word.split('_'))
