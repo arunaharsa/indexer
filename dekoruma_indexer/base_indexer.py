@@ -97,7 +97,7 @@ class BaseIndexer(object):
 
         for idx, instance in enumerate(qs):
             builded_object = self.build_object(instance)
-            print 'building object (', idx + 1, '/', len(qs), ')', builded_object.get('url')
+            print 'building object (', idx + 1, '/', len(qs), ')', builded_object.get('objectID')
             batch.append(builded_object)
             if len(batch) >= batch_size:
                 result = self.__index.save_objects(batch)
